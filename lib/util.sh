@@ -17,10 +17,12 @@ sys_cmd() {
 # Run a command with its output streamed to the terminal as well as the log
 # (SysCommand(peek_output=True)).
 sys_cmd_peek() {
-  local rc=0
+  # `local -` scopes the option change to this function (bash ≥ 4.4); with
+  # pipefail the status is the command's, since tee does not fail.
+  local - rc=0
+  set -o pipefail
   debug "+ $*"
-  "$@" > >(tee -a "$ARCHINSTALL_LOG_FILE") 2>&1 || rc=$?
-  wait $! 2>/dev/null || true
+  "$@" 2>&1 | tee -a "$ARCHINSTALL_LOG_FILE" || rc=$?
   return $rc
 }
 

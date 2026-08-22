@@ -62,5 +62,16 @@ assert_eq 'dry-run stateless' "$out" 'Hostname:   omarchy'
   exit $failures
 ) || failures=$((failures + $?))
 
+# The streaming runner under the step runner's own shell options (-euo pipefail):
+# output reaches stdout and the log, the command's status is preserved, and
+# nothing references $! (bash does not set it for process substitutions).
+out=$(bash -euo pipefail -c '
+  source "$1/lib/archinstall.sh"
+  sys_cmd_peek sh -c "echo streamed; exit 3" && echo "rc=0" || echo "rc=$?"
+  sys_cmd_peek echo fine && echo "rc=0"
+' _ "$here/.." 2>&1)
+assert_eq 'sys_cmd_peek under set -euo pipefail' "$(tr '\n' '|' <<<"$out")" 'streamed|rc=3|fine|rc=0|'
+assert_eq 'sys_cmd_peek logs the output' "$(grep -cx 'streamed' "$ARCHINSTALL_LOG_DIR/install.log")" 1
+
 if ((failures)); then printf '%d failure(s)\n' "$failures"; exit 1; fi
 printf 'all step tests passed\n'
