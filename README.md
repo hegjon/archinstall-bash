@@ -32,33 +32,8 @@ installer_mount_ordered_layout
 ...
 ```
 
-`examples/omarchy-install-sequence.sh` is the orchestrator's
-`arch_install_system` phase written against this library.
-
-## Driving it from another language: `archinstall-step`
-
-`bin/archinstall-step` runs one installer step per process and keeps the
-parsed configuration and installer state in a file in between, so a driver in
-another language (Omarchy's Python orchestrator) can call the same sequence
-archinstall's `Installer` exposes:
-
-```
-archinstall-step --state /run/omarchy-install/archinstall.state --target /mnt \
-    load-config --config user_configuration.json --creds user_credentials.json
-archinstall-step --state … perform-filesystem-operations
-archinstall-step --state … mount-ordered-layout
-archinstall-step --state … query          # JSON: partitions (dev_path, partuuid, partn, mountpoint…),
-                                          # kernel cmdline, pre_mount/encrypted/bootloader flags
-archinstall-step --state … --only-missing minimal-installation --no-mkinitcpio
-archinstall-step --state … set-mirrors on_target | setup-swap | create-users | install-applications
-archinstall-step --state … add-packages omarchy omarchy-settings …
-archinstall-step --state … set-timezone | activate-time-sync | set-root-password | genfstab | finish
-archinstall-step has-uefi | parent-device DEV | unique-device-path DEV | target-has-package TARGET NAME
-```
-
-Progress lines go to stdout like the CLI; `query` and `kernel-params` print
-only their result. The state file is written 0600 (it carries the LUKS
-passphrase) — keep it on a tmpfs such as `/run`.
+Omarchy's ISO orchestrator (omarchy-iso, `orchestrator/*.sh`) sources it this
+way.
 
 ## Requirements
 
@@ -103,7 +78,7 @@ Omarchy-specific conveniences that upstream lacks:
   the target does not already hold (the adapter's `install_base_delta`).
 * `target_has_package <target> <name>` (the adapter's helper of the same name).
 * `installer_set_keyboard_language` writes the keymap with `systemd-firstboot`
-  instead of booting the target in a container (what `keyboard.py` does).
+  instead of booting the target in a container.
 
 ## Deliberate differences
 
@@ -143,8 +118,7 @@ where upstream would merely skip).
 ## Tests
 
 ```
-tests/test_config.sh              # parser, layout validation, kernel params (unprivileged)
-tests/test_step.sh                # archinstall-step state round-trip and query output (unprivileged)
+tests/test_config.sh              # parser, layout validation, kernel params, command helpers (unprivileged)
 sudo tests/test_disk_loop.sh      # partition + LUKS + btrfs + mount on a loop device
 ```
 

@@ -108,6 +108,17 @@ assert_eq 'plaintext root password hashed' "${CFG_ROOT_ENC_PASSWORD:0:1}" '$'
 assert_eq 'plaintext user password hashed' "${USER_NAME[*]}/${USER_ENC_PASSWORD[0]:0:1}/${USER_SUDO[*]}" 't/$/false'
 assert_eq 'pre-mount type' "$DISK_CONFIG_TYPE/$DISK_MOUNTPOINT" pre_mounted_config//mnt
 
+# The streaming runner under a caller's -euo pipefail: output reaches stdout
+# and the log, the command's status is preserved, and nothing references $!
+# (bash does not set it for process substitutions).
+out=$(bash -euo pipefail -c '
+  source "$1/lib/archinstall.sh"
+  sys_cmd_peek sh -c "echo streamed; exit 3" && echo "rc=0" || echo "rc=$?"
+  sys_cmd_peek echo fine && echo "rc=0"
+' _ "$here/.." 2>&1)
+assert_eq 'sys_cmd_peek under set -euo pipefail' "$(tr '\n' '|' <<<"$out")" 'streamed|rc=3|fine|rc=0|'
+assert_eq 'sys_cmd_peek logs the output' "$(grep -cx 'streamed' "$ARCHINSTALL_LOG_DIR/install.log")" 1
+
 rm -rf "$ARCHINSTALL_LOG_DIR"
 if ((failures)); then
   printf '%d failure(s)\n' "$failures"
