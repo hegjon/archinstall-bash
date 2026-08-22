@@ -7,7 +7,9 @@ ARCHINSTALL_LOG_FILE=${ARCHINSTALL_LOG_FILE:-$ARCHINSTALL_LOG_DIR/install.log}
 ARCHINSTALL_DEBUG=${ARCHINSTALL_DEBUG:-0}
 
 log_init() {
-  if ! mkdir -p "$ARCHINSTALL_LOG_DIR" 2>/dev/null || ! : >>"$ARCHINSTALL_LOG_FILE" 2>/dev/null; then
+  # stderr is silenced before the file redirection so a refused open (an
+  # unprivileged caller) does not print before it takes effect.
+  if ! mkdir -p "$ARCHINSTALL_LOG_DIR" 2>/dev/null || ! : 2>/dev/null >>"$ARCHINSTALL_LOG_FILE"; then
     ARCHINSTALL_LOG_FILE=/dev/null
   fi
 }
