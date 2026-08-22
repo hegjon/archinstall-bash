@@ -109,3 +109,7 @@ would merely skip).
 tests/test_config.sh              # parser, layout validation, kernel params (unprivileged)
 sudo tests/test_disk_loop.sh      # partition + LUKS + btrfs + mount on a loop device
 ```
+
+## Licence
+
+GPL-3.0, as a derivative work of [archinstall](https://github.com/archlinux/archinstall) (see LICENSE).
