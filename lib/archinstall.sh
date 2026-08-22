@@ -6,7 +6,7 @@
 ARCHINSTALL_BASH_VERSION=0.1.0
 ARCHINSTALL_LIB_DIR=${ARCHINSTALL_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
 
-for _archinstall_module in log util hardware disk luks config filesystem pacman mirrors locale installer network applications guided; do
+for _archinstall_module in log util hardware disk luks config filesystem pacman mirrors locale installer network applications guided state; do
   # shellcheck disable=SC1090
   source "$ARCHINSTALL_LIB_DIR/$_archinstall_module.sh"
 done

@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+#
+# Run one archinstall step at a time, keeping the parsed configuration and
+# installer state in a file between invocations. This is how a driver in
+# another language (Omarchy's Python orchestrator) uses the library: the same
+# calls archinstall's Installer exposes, one process each.
+#
+#   archinstall-step --state S --target /mnt load-config --config C --creds K
+#   archinstall-step --state S perform-filesystem-operations
+#   archinstall-step --state S mount-ordered-layout
+#   archinstall-step --state S query            # JSON: partitions, cmdline, flags
+#   archinstall-step --state S minimal-installation [--no-mkinitcpio]
+#   ...
+#   archinstall-step --state S finish
+
+set -euo pipefail
+
+ARCHINSTALL_BIN_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+ARCHINSTALL_LIB_DIR=${ARCHINSTALL_LIB_DIR:-$ARCHINSTALL_BIN_DIR/../lib}
+# shellcheck disable=SC1091
+source "$ARCHINSTALL_LIB_DIR/archinstall.sh"
+
+usage() {
+  cat <<USAGE
+Usage: archinstall-step [--state FILE] [--target DIR] [--only-missing] [--debug] COMMAND [args]
+
+Stateful commands (need --state; load-config creates the file):
+  load-config --config FILE [--creds FILE]   parse the configuration, init the installer
+  perform-filesystem-operations              partition, format, encrypt, btrfs subvolumes
+  mount-ordered-layout                       unlock + mount the layout at the target
+  set-mirrors live|on_target                 custom servers / repositories
+  minimal-installation [--no-mkinitcpio]     pacstrap base, pacman.conf, vconsole, hostname, locale
+  setup-swap                                 zram (no-op unless swap is enabled)
+  create-users                               users from the credentials
+  install-applications                       PipeWire / Bluetooth selections
+  add-packages PKG...                        pacstrap additional packages
+  enable-service UNIT...                     systemctl --root enable
+  set-timezone | activate-time-sync | set-root-password | genfstab
+  finish                                     sync + post-install check
+  query                                      JSON: flags, partitions, kernel cmdline
+  kernel-params                              kernel cmdline for the root partition
+
+Stateless commands:
+  has-uefi                                   exit 0 on UEFI firmware
+  parent-device DEV                          disk holding a partition
+  unique-device-path DEV                     /dev/disk/by-id path for a disk
+  target-has-package TARGET NAME             exit 0 if installed in the target
+  dry-run --config FILE [--creds FILE]       parse + validate, print a summary
+USAGE
+}
+
+STATE='' TARGET=/mnt
+while (($#)); do
+  case $1 in
+    --state) STATE=$2; shift 2 ;;
+    --state=*) STATE=${1#*=}; shift ;;
+    --target) TARGET=$2; shift 2 ;;
+    --target=*) TARGET=${1#*=}; shift ;;
+    --only-missing) INSTALLER_STRAP_ONLY_MISSING=1; shift ;;
+    --debug) ARCHINSTALL_DEBUG=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) usage >&2; die "unknown option: $1" ;;
+    *) break ;;
+  esac
+done
+(($#)) || { usage >&2; die 'a command is required'; }
+COMMAND=$1
+shift
+
+parse_config_args() {
+  CONFIG_FILE='' CREDS_FILE=''
+  while (($#)); do
+    case $1 in
+      --config) CONFIG_FILE=$2; shift 2 ;;
+      --creds) CREDS_FILE=$2; shift 2 ;;
+      *) die "$COMMAND: unknown argument $1" ;;
+    esac
+  done
+  [[ -n $CONFIG_FILE ]] || die "$COMMAND: --config is required"
+}
+
+# One partition as JSON (or null).
+part_json() {
+  local i=${1:-}
+  [[ -n $i ]] || { printf 'null'; return 0; }
+  jq -n --arg dev "${PART_DEVPATH[i]}" --arg mp "${PART_MOUNTPOINT[i]}" --arg partn "${PART_PARTN[i]}" \
+    --arg partuuid "${PART_PARTUUID[i]}" --arg uuid "${PART_UUID[i]}" --arg fs "${PART_FS[i]}" \
+    --arg mapper "$(part_is_encrypted "$i" && part_mapper_name "$i" || true)" --arg subvols "${PART_SUBVOLS[i]}" \
+    '{dev_path: (if $dev == "" then null else $dev end), mountpoint: (if $mp == "" then null else $mp end),
+      partn: (if $partn == "" then null else ($partn | tonumber) end), partuuid: (if $partuuid == "" then null else $partuuid end),
+      uuid: (if $uuid == "" then null else $uuid end), fs_type: (if $fs == "" then null else $fs end),
+      mapper_name: (if $mapper == "" then null else $mapper end),
+      btrfs_subvols: ($subvols | split(" ") | map(select(. != "") | split("=") | {name: .[0], mountpoint: .[1]}))}'
+}
+
+query_json() {
+  local root boot efi params=''
+  root=$(installer_get_root) || root=''
+  boot=$(installer_get_boot_partition) || boot=''
+  efi=$(installer_get_efi_partition) || efi=''
+  if [[ -n $root && -n ${PART_FS[root]} ]]; then
+    params=$(installer_get_kernel_params "$root")
+  fi
+  jq -n --arg target "$INST_TARGET" --arg config_type "$DISK_CONFIG_TYPE" --arg enc "$ENC_TYPE" \
+    --argjson uefi "$(sysinfo_has_uefi && printf true || printf false)" \
+    --arg bootloader "$CFG_BOOTLOADER" --argjson uki "$CFG_BOOT_UKI" --argjson removable "$CFG_BOOT_REMOVABLE" \
+    --arg hostname "$CFG_HOSTNAME" --arg timezone "$CFG_TIMEZONE" --argjson ntp "$CFG_NTP" --argjson swap "$CFG_SWAP_ENABLED" \
+    --argjson mirror "$CFG_HAS_MIRROR_CONFIG" --argjson app "$CFG_HAS_APP_CONFIG" --arg kb "$CFG_LOCALE_KB" \
+    --argjson kernels "$(printf '%s\n' "${INST_KERNELS[@]}" | jq -R . | jq -s .)" \
+    --argjson users "$(printf '%s\n' "${USER_NAME[@]}" | jq -R . | jq -s 'map(select(. != ""))')" \
+    --argjson root_password "$([[ -n $CFG_ROOT_ENC_PASSWORD ]] && printf true || printf false)" \
+    --argjson root "$(part_json "$root")" --argjson boot "$(part_json "$boot")" --argjson efi "$(part_json "$efi")" \
+    --arg params "$params" --argjson zram "$((INST_ZRAM_ENABLED))" \
+    '{target: $target, disk_config_type: $config_type, pre_mount: ($config_type == "pre_mounted_config"),
+      encrypted: ($enc != "no_encryption"), has_uefi: $uefi,
+      bootloader: (if $bootloader == "" then null else $bootloader end), bootloader_uki: $uki, bootloader_removable: $removable,
+      hostname: $hostname, timezone: $timezone, ntp: $ntp, swap: $swap, zram_enabled: ($zram == 1),
+      mirror_config: $mirror, app_config: $app, kb_layout: $kb, kernels: $kernels, users: $users,
+      root_password: $root_password, root: $root, boot: $boot, efi: $efi,
+      kernel_params: (if $params == "" then null else $params end)}'
+}
+
+# Stateless commands first.
+case $COMMAND in
+  has-uefi) sysinfo_has_uefi; exit $? ;;
+  parent-device) get_parent_device_path "${1:?device}"; echo; exit 0 ;;
+  unique-device-path) get_unique_device_path_or_fail() { get_unique_path_for_device "$1" || exit 1; echo; }; get_unique_device_path_or_fail "${1:?device}"; exit 0 ;;
+  target-has-package) target_has_package "${1:?target}" "${2:?package}"; exit $? ;;
+  dry-run) parse_config_args "$@"; config_load "$CONFIG_FILE" "$CREDS_FILE"; config_summary; exit 0 ;;
+  -h|--help|help) usage; exit 0 ;;
+esac
+
+[[ -n $STATE ]] || { usage >&2; die "$COMMAND needs --state FILE"; }
+
+if [[ $COMMAND == load-config ]]; then
+  parse_config_args "$@"
+  [[ $EUID -eq 0 ]] || die 'archinstall-step requires root privileges'
+  config_load "$CONFIG_FILE" "$CREDS_FILE"
+  installer_init "$TARGET" "${CFG_KERNELS[@]}"
+  state_save "$STATE"
+  exit 0
+fi
+
+[[ -f $STATE ]] || die "state file $STATE missing; run load-config first"
+# shellcheck disable=SC1090
+source "$STATE"
+
+case $COMMAND in
+  query) query_json; exit 0 ;;
+  kernel-params) root=$(installer_get_root) || die 'no root partition in the layout'; installer_get_kernel_params "$root"; exit 0 ;;
+esac
+
+[[ $EUID -eq 0 ]] || die 'archinstall-step requires root privileges'
+case $COMMAND in
+  perform-filesystem-operations) fs_perform_filesystem_operations ;;
+  mount-ordered-layout) installer_mount_ordered_layout ;;
+  set-mirrors) [[ $CFG_HAS_MIRROR_CONFIG == true ]] && installer_set_mirrors "${1:?live|on_target}" ;;
+  minimal-installation) installer_minimal_installation "$@" ;;
+  setup-swap) [[ $CFG_SWAP_ENABLED == true ]] && installer_setup_swap "$CFG_SWAP_ALGO" ;;
+  create-users) installer_create_users ;;
+  install-applications) [[ $CFG_HAS_APP_CONFIG == true ]] && applications_install ;;
+  add-packages) installer_add_additional_packages "$@" ;;
+  enable-service) installer_enable_service "$@" ;;
+  set-timezone) [[ -n $CFG_TIMEZONE ]] && { installer_set_timezone "$CFG_TIMEZONE" || true; } ;;
+  activate-time-sync) installer_activate_time_synchronization ;;
+  set-root-password) [[ -n $CFG_ROOT_ENC_PASSWORD ]] && { installer_set_user_password root "$CFG_ROOT_ENC_PASSWORD" || true; } ;;
+  genfstab) installer_genfstab ;;
+  finish) installer_finish ;;
+  *) usage >&2; die "unknown command: $COMMAND" ;;
+esac
+state_save "$STATE"

@@ -51,7 +51,9 @@ installer_finish() {
     [[ ${INST_HELPER_FLAGS[$step]} == false ]] && missing+=("$step")
   done
   if ((${#missing[@]} == 0)); then
-    info "Installation completed without any errors. Log files temporarily available at $ARCHINSTALL_LOG_DIR. You may reboot when ready."
+    info 'Installation completed without any errors.'
+    info "Log files temporarily available at $ARCHINSTALL_LOG_DIR."
+    info 'You may reboot when ready.'
     return 0
   fi
   warn 'Some required steps were not successfully installed/configured before leaving the installer:'

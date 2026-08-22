@@ -35,6 +35,31 @@ installer_mount_ordered_layout
 `examples/omarchy-install-sequence.sh` is the orchestrator's
 `arch_install_system` phase written against this library.
 
+## Driving it from another language: `archinstall-step`
+
+`bin/archinstall-step` runs one installer step per process and keeps the
+parsed configuration and installer state in a file in between, so a driver in
+another language (Omarchy's Python orchestrator) can call the same sequence
+archinstall's `Installer` exposes:
+
+```
+archinstall-step --state /run/omarchy-install/archinstall.state --target /mnt \
+    load-config --config user_configuration.json --creds user_credentials.json
+archinstall-step --state … perform-filesystem-operations
+archinstall-step --state … mount-ordered-layout
+archinstall-step --state … query          # JSON: partitions (dev_path, partuuid, partn, mountpoint…),
+                                          # kernel cmdline, pre_mount/encrypted/bootloader flags
+archinstall-step --state … --only-missing minimal-installation --no-mkinitcpio
+archinstall-step --state … set-mirrors on_target | setup-swap | create-users | install-applications
+archinstall-step --state … add-packages omarchy omarchy-settings …
+archinstall-step --state … set-timezone | activate-time-sync | set-root-password | genfstab | finish
+archinstall-step has-uefi | parent-device DEV | unique-device-path DEV | target-has-package TARGET NAME
+```
+
+Progress lines go to stdout like the CLI; `query` and `kernel-params` print
+only their result. The state file is written 0600 (it carries the LUKS
+passphrase) — keep it on a tmpfs such as `/run`.
+
 ## Requirements
 
 bash ≥ 5, jq, gawk, util-linux (sfdisk, lsblk, wipefs, findmnt, mount,
@@ -119,6 +144,7 @@ where upstream would merely skip).
 
 ```
 tests/test_config.sh              # parser, layout validation, kernel params (unprivileged)
+tests/test_step.sh                # archinstall-step state round-trip and query output (unprivileged)
 sudo tests/test_disk_loop.sh      # partition + LUKS + btrfs + mount on a loop device
 ```
 
