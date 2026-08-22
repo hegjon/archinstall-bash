@@ -2,7 +2,9 @@
 # Port of lib/installer.py (Installer) for the steps guided installs use:
 # mounting the layout, key files, minimal installation (pacstrap + base
 # configuration), swap, users, services, timezone, fstab, kernel parameters.
-# LVM, FIDO2 and the systemd-boot/GRUB/efistub/rEFInd bootloaders are not ported.
+# Not ported: LVM, FIDO2, bootloader installation (Omarchy installs Limine
+# itself; installer_get_kernel_params and the partition lookups feed it), key
+# files for non-root encrypted partitions, btrfs snapshot tooling.
 
 INST_TARGET=/mnt
 INST_BASE_PACKAGES=()
@@ -57,63 +59,6 @@ installer_finish() {
     warn " - $step"
   done
   return 1
-}
-
-# ── sanity checks ─────────────────────────────────────────────────────────────
-
-installer_service_state() {
-  local service=$1
-  [[ $service == *.service || $service == *.target || $service == *.timer ]] || service+=.service
-  SYSTEMD_COLORS=0 systemctl show --no-pager -p SubState --value "$service" 2>/dev/null
-}
-
-installer_service_started() {
-  local service=$1 ts
-  [[ $service == *.service || $service == *.target || $service == *.timer ]] || service+=.service
-  ts=$(SYSTEMD_COLORS=0 systemctl show --property=ActiveEnterTimestamp --no-pager "$service" 2>/dev/null)
-  ts=${ts#ActiveEnterTimestamp=}
-  [[ -n $ts ]]
-}
-
-# Installer.sanity_check(offline, skip_ntp, skip_wkd) → _verify_service_stop()
-installer_sanity_check() {
-  local offline=${1:-0} skip_ntp=${2:-0} skip_wkd=${3:-0} started notified=0 i
-  if ((!skip_ntp)); then
-    info 'Waiting for time sync (timedatectl show) to complete.'
-    started=$SECONDS
-    while [[ $(timedatectl show --property=NTPSynchronized --value 2>/dev/null) != yes ]]; do
-      if ((!notified && SECONDS - started > 5)); then
-        notified=1
-        warn 'Time synchronization not completing, while you wait - check the docs for workarounds: https://archinstall.readthedocs.io/'
-      fi
-      sleep 1
-    done
-  else
-    info 'Skipping waiting for automatic time sync (this can cause issues if time is out of sync during installation)'
-  fi
-
-  if ((!offline)); then
-    info 'Waiting for automatic mirror selection (reflector) to complete.'
-    for ((i = 0; i < 60; i++)); do
-      case $(installer_service_state reflector) in dead|failed|exited) break ;; esac
-      sleep 1
-    done
-    ((i == 60)) && warn 'Reflector did not complete within 60 seconds, continuing anyway...'
-  else
-    info 'Skipped reflector...'
-  fi
-
-  if ((!skip_wkd)); then
-    info 'Waiting for Arch Linux keyring sync (archlinux-keyring-wkd-sync) to complete.'
-    until installer_service_started archlinux-keyring-wkd-sync.timer; do sleep 1; done
-    while :; do
-      case $(installer_service_state archlinux-keyring-wkd-sync.service) in dead|failed|exited) break ;; esac
-      sleep 1
-    done
-    [[ $(installer_service_state archlinux-keyring-wkd-sync.service) == failed ]] &&
-      warn 'archlinux-keyring-wkd-sync failed, keyring may need reinit during pacman sync'
-  fi
-  return 0
 }
 
 # ── mounting ──────────────────────────────────────────────────────────────────
@@ -225,31 +170,6 @@ installer_merge_options() {
   printf '%s' "$out"
 }
 
-# ── encryption key files ─────────────────────────────────────────────────────
-
-# Installer.generate_key_files() for LUKS partitions.
-installer_generate_key_files() {
-  [[ $ENC_TYPE == luks ]] || return 0
-  local root_is_encrypted=0 i gen
-  for i in "${ENC_PARTS[@]}"; do
-    part_is_root "$i" && root_is_encrypted=1
-  done
-  for i in "${ENC_PARTS[@]}"; do
-    # DiskEncryption.should_generate_encryption_file(): anything but /
-    gen=1
-    [[ ${PART_MOUNTPOINT[i]} == / ]] && gen=0
-    if ((gen)) && ! part_is_root "$i"; then
-      if ((root_is_encrypted)); then
-        debug "Creating key-file: ${PART_DEVPATH[i]}"
-        luks_create_keyfile "${PART_DEVPATH[i]}" "$(part_mapper_name "$i")" "$ENC_PASSWORD" "$INST_TARGET"
-      else
-        debug "Adding passphrase-based crypttab entry for ${PART_DEVPATH[i]}"
-        luks_create_crypttab_entry "${PART_DEVPATH[i]}" "$(part_mapper_name "$i")" "$INST_TARGET"
-      fi
-    fi
-  done
-}
-
 # ── base system ───────────────────────────────────────────────────────────────
 
 # Installer._prepare_fs_type()
@@ -275,16 +195,14 @@ installer_prepare_encrypt() {
   INST_HOOKS=("${hooks[@]}")
 }
 
-# Installer.minimal_installation(). Options: --no-mkinitcpio --no-hostname
-# --no-locale (the Python keyword arguments); optional repositories, pacman
-# and locale settings come from the loaded configuration.
+# Installer.minimal_installation(). --no-mkinitcpio is the mkinitcpio=False
+# keyword (Omarchy builds its UKI later); hostname, locale, optional
+# repositories and pacman settings come from the loaded configuration.
 installer_minimal_installation() {
-  local run_mkinitcpio=1 set_hostname=1 set_locale=1 arg i ucode
+  local run_mkinitcpio=1 arg i ucode
   for arg in "$@"; do
     case $arg in
       --no-mkinitcpio) run_mkinitcpio=0 ;;
-      --no-hostname) set_hostname=0 ;;
-      --no-locale) set_locale=0 ;;
       *) die "installer_minimal_installation: unknown option $arg" ;;
     esac
   done
@@ -306,7 +224,7 @@ installer_minimal_installation() {
   pacman_config_enable "${CFG_MIRROR_OPTIONAL_REPOS[@]}"
   pacman_config_apply
 
-  ((set_locale)) && installer_set_vconsole
+  installer_set_vconsole
 
   pacman_strap "${INST_BASE_PACKAGES[@]}"
   INST_HELPER_FLAGS[base-strapped]=true
@@ -317,12 +235,10 @@ installer_minimal_installation() {
   # https://github.com/archlinux/archinstall/issues/880 / #1837 / #1841
   ((INST_DISABLE_FSTRIM)) || installer_enable_periodic_trim
 
-  ((set_hostname)) && [[ -n $CFG_HOSTNAME ]] && installer_set_hostname "$CFG_HOSTNAME"
+  [[ -n $CFG_HOSTNAME ]] && installer_set_hostname "$CFG_HOSTNAME"
 
-  if ((set_locale)); then
-    installer_set_locale || true
-    installer_set_keyboard_language "$CFG_LOCALE_KB" || true
-  fi
+  installer_set_locale || true
+  installer_set_keyboard_language "$CFG_LOCALE_KB" || true
 
   if ((run_mkinitcpio)) && ! installer_mkinitcpio -P; then
     error 'Error generating initramfs (continuing anyway)'
@@ -370,31 +286,6 @@ installer_setup_swap() {
   printf '[zram0]\ncompression-algorithm = %s\n' "$algo" >"$INST_TARGET/etc/systemd/zram-generator.conf"
   installer_enable_service systemd-zram-setup@zram0.service
   INST_ZRAM_ENABLED=1
-}
-
-# Installer.setup_btrfs_snapshot(): snapper or timeshift (no GRUB integration).
-installer_setup_btrfs_snapshot() {
-  local snapshot_type=$1 name mp
-  case $snapshot_type in
-    snapper)
-      debug 'Setting up Btrfs snapper'
-      pacman_strap snapper
-      for name in root home; do
-        mp=/
-        [[ $name == home ]] && mp=/home
-        chroot_cmd_peek snapper --no-dbus -c "$name" create-config "$mp" || die "Could not setup Btrfs snapper: $SYS_CMD_OUTPUT"
-      done
-      installer_enable_service snapper-timeline.timer snapper-cleanup.timer
-      ;;
-    timeshift)
-      debug 'Setting up Btrfs timeshift'
-      pacman_strap cronie timeshift
-      installer_enable_service cronie.service
-      ;;
-    *) die "Unsupported snapshot type: $snapshot_type" ;;
-  esac
-  [[ $CFG_BOOTLOADER == grub ]] && warn 'grub-btrfs integration is not ported'
-  return 0
 }
 
 # ── services, users, misc ─────────────────────────────────────────────────────

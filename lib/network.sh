@@ -1,34 +1,14 @@
 # shellcheck shell=bash
-# Port of lib/network/network_handler.py install_network_config() and
-# Installer.copy_iso_network_config().
+# Port of Installer.copy_iso_network_config() — network_config type "iso", the
+# only type Omarchy uses. nm / nm_iwd / iwd / manual are not ported.
 
 # install_network_config(network_config.type)
 network_install_config() {
   local type=${1:-$CFG_NETWORK_TYPE}
   case $type in
     iso) installer_copy_iso_network_config enable_services ;;
-    nm|nm_iwd)
-      local -a packages=(networkmanager)
-      if [[ $type == nm ]]; then packages+=(wpa_supplicant); else packages+=(iwd); fi
-      installer_add_additional_packages "${packages[@]}"
-      installer_enable_service NetworkManager.service
-      if [[ $type == nm_iwd ]]; then
-        mkdir -p "$INST_TARGET/etc/NetworkManager/conf.d"
-        printf '[device]\nwifi.backend=iwd\n' >"$INST_TARGET/etc/NetworkManager/conf.d/wifi_backend.conf"
-        installer_disable_service iwd.service
-      fi
-      ;;
-    iwd)
-      installer_add_additional_packages iwd
-      mkdir -p "$INST_TARGET/etc/iwd" "$INST_TARGET/etc/systemd/network"
-      printf '[General]\nEnableNetworkConfiguration=true\n\n[Network]\nNameResolvingService=systemd\n' >"$INST_TARGET/etc/iwd/main.conf"
-      printf '[Match]\nType=ether\nKind=!*\n\n[Network]\nDHCP=yes\n' >"$INST_TARGET/etc/systemd/network/20-wired.network"
-      installer_systemd_resolved_stub_mode
-      installer_enable_service iwd.service systemd-networkd.service systemd-resolved.service
-      ;;
-    manual) die 'network_config type "manual" is not supported by this port' ;;
     '') ;;
-    *) die "unknown network_config type: $type" ;;
+    *) die "network_config type \"$type\" is not supported by this port (iso only)" ;;
   esac
 }
 

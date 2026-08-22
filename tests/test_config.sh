@@ -56,6 +56,12 @@ assert_eq 'has default btrfs vols' "$(disk_has_default_btrfs_vols && echo yes)" 
 assert_eq 'encryption' "$ENC_TYPE/${ENC_PARTS[*]}/$ENC_ITER_TIME/$ENC_PASSWORD" luks/1/2000/hunter2
 assert_eq 'mapper name' "$(part_mapper_name 1)" root
 assert_eq 'sorted partitions' "$(disk_partition_indexes_sorted 0 | tr '\n' ' ')" '0 1 '
+bad=$(jq '.disk_config.device_modifications[0].wipe = false' "$here/../examples/omarchy-full-disk.json")
+out=$( (CONFIG_JSON=$(jq -c -s '.[0] + .[1]' <(printf '%s' "$bad") "$here/../examples/omarchy-credentials.json"); config_parse) 2>&1)
+assert_eq 'wipe:false refused' "${out%%;*}" 'error: device_modifications without wipe: true (adding partitions to an existing table) is not supported by this port'
+bad=$(jq '.disk_config.disk_encryption.partitions = ["ea21d3f2-82bb-49cc-ab5d-6f81ae94e18d"]' "$here/../examples/omarchy-full-disk.json")
+out=$( (CONFIG_JSON=$(jq -c -s '.[0] + .[1]' <(printf '%s' "$bad") "$here/../examples/omarchy-credentials.json"); config_parse) 2>&1)
+assert_eq 'non-root encryption refused' "${out%% (*}" 'error: only the root partition may be encrypted in this port'
 
 assert_eq 'sfdisk line esp' "$(fs_sfdisk_line 0 512 gpt)" 'start=2048, size=4194304, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B'
 assert_eq 'sfdisk line root' "$(fs_sfdisk_line 1 512 gpt)" 'start=4196352, size=12580864, type=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709'

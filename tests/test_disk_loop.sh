@@ -92,11 +92,6 @@ echo '== mapper collision is refused'
 out=$(luks_unlock_if_needed "${loop}p1" root hunter2 2>&1) && fail 'host /dev/mapper/root was accepted for another device'
 [[ $out == *'already exists'* ]] || fail "unexpected collision message: $out"
 
-echo '== generate_key_files (single encrypted root: nothing to do)'
-mkdir -p "$target/etc"
-installer_generate_key_files
-[[ ! -e $target/etc/crypttab ]] || fail 'unexpected crypttab'
-
 echo '== re-run wipes the previous layout'
 fs_perform_filesystem_operations
 [[ $(lsblk -dnro FSTYPE "${loop}p2") == crypto_LUKS ]] || fail 'second run'

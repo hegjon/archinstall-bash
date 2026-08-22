@@ -5,7 +5,9 @@
 # --creds user_credentials.json` consumes. Parsed with jq into flat bash state.
 #
 # Not ported: LVM layouts, FIDO2/HSM encryption, profiles, the interactive
-# menu, encrypted credential files.
+# menu, encrypted credential files, bootloader installation (Omarchy installs
+# Limine itself), encrypting anything but the root partition, modifying
+# existing partition tables (only wipe: true or pre_mounted_config).
 
 CONFIG_JSON='{}'
 
@@ -18,7 +20,7 @@ CFG_LOCALE_KB='' CFG_LOCALE_LANG=en_US.UTF-8 CFG_LOCALE_ENC=UTF-8 CFG_LOCALE_FON
 CFG_HAS_MIRROR_CONFIG=false
 CFG_MIRROR_CUSTOM_SERVERS=() CFG_MIRROR_REGIONS=() CFG_MIRROR_OPTIONAL_REPOS=()
 CFG_MIRROR_CUSTOM_REPOS=() # "name<TAB>url<TAB>SignCheck<TAB>SignOption"
-CFG_BOOTLOADER='' CFG_BOOT_UKI=false CFG_BOOT_REMOVABLE=false CFG_BOOT_PLYMOUTH=''
+CFG_BOOTLOADER='' CFG_BOOT_UKI=false CFG_BOOT_REMOVABLE=false
 CFG_NETWORK_TYPE=''
 CFG_HAS_APP_CONFIG=false CFG_AUDIO='' CFG_BLUETOOTH=false
 CFG_ROOT_ENC_PASSWORD=''
@@ -33,7 +35,6 @@ PART_FS=() PART_MOUNTPOINT=() PART_MOUNT_OPTIONS=() PART_FLAGS=() PART_SUBVOLS=(
 PART_DEVPATH=() PART_PARTN=() PART_PARTUUID=() PART_UUID=()
 # DiskEncryption
 ENC_TYPE=no_encryption ENC_PASSWORD='' ENC_ITER_TIME=10000 ENC_PARTS=()
-BTRFS_SNAPSHOT_TYPE=''
 
 ENC_IDENTIFIER=ainst
 
@@ -122,26 +123,25 @@ config_parse() {
   # NetworkConfiguration
   CFG_NETWORK_TYPE=$(cfg '.network_config.type // empty')
 
-  # BootloaderConfiguration (or the deprecated bootloader/uki fields)
+  # BootloaderConfiguration: recorded for the caller (Omarchy installs Limine
+  # itself); this port installs no bootloader.
   if [[ $(cfg '.bootloader_config | type') == object ]]; then
     CFG_BOOTLOADER=$(bootloader_from_arg "$(cfg '.bootloader_config.bootloader // empty')")
     CFG_BOOT_UKI=$(cfg '.bootloader_config.uki // false')
     CFG_BOOT_REMOVABLE=$(cfg '.bootloader_config.removable // false')
-    CFG_BOOT_PLYMOUTH=$(cfg '.bootloader_config.plymouth // empty')
   elif [[ -n $(cfg '.bootloader // empty') ]]; then
     CFG_BOOTLOADER=$(bootloader_from_arg "$(cfg '.bootloader')")
     CFG_BOOT_UKI=$(cfg '.uki // false')
     CFG_BOOT_REMOVABLE=true
   fi
-  if [[ $CFG_BOOT_UKI == true ]] && ! bootloader_has_uki_support "$CFG_BOOTLOADER"; then
-    CFG_BOOT_UKI=false
-  fi
+  [[ -n $(cfg '.bootloader_config.plymouth // empty') ]] && warn 'bootloader_config.plymouth is not supported by this port and will be ignored'
 
   # ApplicationConfiguration (+ deprecated top-level audio_config)
   if [[ $(cfg '.app_config | type') == object || $(cfg '.audio_config | type') == object ]]; then
     CFG_HAS_APP_CONFIG=true
     CFG_AUDIO=$(cfg '.app_config.audio_config.audio // .audio_config.audio // empty')
     CFG_BLUETOOTH=$(cfg '.app_config.bluetooth_config.enabled // false')
+    [[ -n $CFG_AUDIO && $CFG_AUDIO != pipewire && $CFG_AUDIO != 'No audio server' ]] && die "audio server $CFG_AUDIO is not supported by this port (pipewire only)"
     for v in power_management_config print_service_config firewall_config fonts_config; do
       [[ $(cfg ".app_config.$v // empty") ]] && warn "app_config.$v is not supported by this port and will be ignored"
     done
@@ -194,7 +194,6 @@ config_parse_disk() {
   PART_FS=() PART_MOUNTPOINT=() PART_MOUNT_OPTIONS=() PART_FLAGS=() PART_SUBVOLS=()
   PART_DEVPATH=() PART_PARTN=() PART_PARTUUID=() PART_UUID=()
   ENC_TYPE=no_encryption ENC_PASSWORD='' ENC_ITER_TIME=10000 ENC_PARTS=()
-  BTRFS_SNAPSHOT_TYPE=''
 
   [[ $(cfg '.disk_config | type') == object && $(cfg '.disk_config | length') -gt 0 ]] || return 0
   DISK_CONFIG_PRESENT=true
@@ -214,6 +213,7 @@ config_parse_disk() {
   while IFS=$'\x1f' read -r device wipe; do
     [[ -n $device ]] || continue
     [[ -b $device ]] || die "device not found: $device"
+    [[ $wipe == true ]] || die "device_modifications without wipe: true (adding partitions to an existing table) is not supported by this port; use pre_mounted_config"
     DEV_PATH+=("$device")
     DEV_WIPE+=("$wipe")
   done < <(cfg '.disk_config.device_modifications // [] | .[] | [(.device // ""), ((.wipe // false) == true)] | map(tostring) | join("\u001f")')
@@ -251,11 +251,10 @@ config_parse_disk() {
   local i
   for i in "${!PART_STATUS[@]}"; do
     case ${PART_STATUS[i]} in
-      existing|modify|delete) [[ -n ${PART_DEVPATH[i]} ]] || die 'If partition marked as existing a path must be set' ;;
       create) ;;
+      existing|modify|delete) die "partition status ${PART_STATUS[i]} is not supported by this port (wiped disks only)" ;;
       *) die "unknown partition status: ${PART_STATUS[i]}" ;;
     esac
-    [[ ${PART_STATUS[i]} == modify && -z ${PART_FS[i]} ]] && die 'FS type must not be empty on modifications with status type modify'
     [[ -n ${PART_FS[i]} ]] && ! fs_type_known "${PART_FS[i]}" && die "unknown fs_type: ${PART_FS[i]}"
   done
   config_validate_layout
@@ -267,9 +266,9 @@ config_parse_disk() {
     config_parse_encryption '.disk_encryption' # deprecated top-level key
   fi
 
-  if disk_has_default_btrfs_vols; then
-    BTRFS_SNAPSHOT_TYPE=$(cfg '.disk_config.btrfs_options.snapshot_config.type // empty')
-  fi
+  [[ -n $(cfg '.disk_config.btrfs_options.snapshot_config.type // empty') ]] &&
+    warn 'btrfs_options.snapshot_config (snapper/timeshift) is not supported by this port and will be ignored'
+  return 0
 }
 
 # PartitionFlag.from_string(): boot, esp, bls_boot (xbootldr), linux-home, swap.
@@ -294,18 +293,15 @@ config_validate_layout() {
   for d in "${!DEV_PATH[@]}"; do
     prev_end=-1 last_end=-1
     for i in $(disk_partition_indexes_sorted "$d"); do
-      [[ ${PART_STATUS[i]} == delete ]] && continue
-      if [[ ${PART_STATUS[i]} == create ]]; then
-        ((PART_START[i] >= mib)) || die 'First partition must start at no less than 1 MiB'
-        ((prev_end < 0 || PART_START[i] >= prev_end)) || die 'Partitions overlap'
-        ((PART_START[i] % mib == 0 && PART_LENGTH[i] % mib == 0)) || die 'Partition is misaligned'
-        last_end=$((PART_START[i] + PART_LENGTH[i]))
-      fi
-      prev_end=$((PART_START[i] + PART_LENGTH[i]))
+      ((PART_START[i] >= mib)) || die 'First partition must start at no less than 1 MiB'
+      ((prev_end < 0 || PART_START[i] >= prev_end)) || die 'Partitions overlap'
+      ((PART_START[i] % mib == 0 && PART_LENGTH[i] % mib == 0)) || die 'Partition is misaligned'
+      last_end=$((PART_START[i] + PART_LENGTH[i]))
+      prev_end=$last_end
     done
     ((last_end < 0)) && continue
     total=$(disk_size_bytes "${DEV_PATH[d]}")
-    if [[ $table == gpt || ${DEV_WIPE[d]} != true && $(lsblk_value "${DEV_PATH[d]}" PTTYPE) == gpt ]]; then
+    if [[ $table == gpt ]]; then
       ((last_end <= total - mib)) || die 'Partition overlaps backup GPT header'
     else
       ((last_end <= total - total % mib)) || die 'Partition too large for device'
@@ -335,10 +331,24 @@ config_parse_encryption() {
     done
   done
   ((${#ENC_PARTS[@]})) || die 'Luks encryption requires partitions to be defined'
+  for i in "${ENC_PARTS[@]}"; do
+    part_is_root "$i" || die "only the root partition may be encrypted in this port (${PART_DEVPATH[i]:-${PART_OBJID[i]}} is not root)"
+  done
   local it
   it=$(cfg "$key.iter_time // empty")
   [[ -n $it ]] && ENC_ITER_TIME=$it
   return 0
+}
+
+# Bootloader.from_arg(), names only.
+bootloader_from_arg() {
+  case ${1,,} in
+    '') printf '' ;;
+    systemd-boot|systemd) printf 'systemd' ;;
+    grub|efistub|limine|refind) printf '%s' "${1,,}" ;;
+    'no bootloader'|no_bootloader|none) printf 'no_bootloader' ;;
+    *) die "Invalid bootloader value \"$1\". Allowed values: Systemd-boot, Grub, Efistub, Limine, Refind, No bootloader" ;;
+  esac
 }
 
 # ── partition model helpers (PartitionModification / DeviceModification) ──────
@@ -368,12 +378,8 @@ part_is_swap() {
   [[ ${PART_FS[$1]} == linux-swap ]]
 }
 
-part_exists() {
-  [[ ${PART_STATUS[$1]} == existing ]]
-}
-
 part_is_create_or_modify() {
-  [[ ${PART_STATUS[$1]} == create || ${PART_STATUS[$1]} == modify ]]
+  [[ ${PART_STATUS[$1]} == create ]]
 }
 
 part_is_encrypted() {
@@ -418,14 +424,13 @@ part_safe_fs_type() {
   printf '%s' "${PART_FS[$1]}"
 }
 
-# Indexes of the partitions on device $1, ordered like archinstall sorts them:
-# deletions first, then by start offset.
+# Indexes of the partitions on device $1, by start offset.
 disk_partition_indexes_sorted() {
   local d=$1 i
   for i in "${!PART_DEV[@]}"; do
     [[ ${PART_DEV[i]} == "$d" ]] || continue
-    printf '%d %d %d\n' "$([[ ${PART_STATUS[i]} == delete ]] && echo 0 || echo 1)" "${PART_START[i]}" "$i"
-  done | sort -n -k1,1 -k2,2 | awk '{ print $3 }'
+    printf '%d %d\n' "${PART_START[i]}" "$i"
+  done | sort -n -k1,1 | awk '{ print $2 }'
 }
 
 disk_device_has_partitions() {

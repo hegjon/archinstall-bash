@@ -3,7 +3,6 @@
 # (applications/audio.py) and bluetooth (applications/bluetooth.py) installers.
 
 PIPEWIRE_PACKAGES=(pipewire pipewire-alsa pipewire-jack pipewire-pulse gst-plugin-pipewire libpulse wireplumber)
-PULSEAUDIO_PACKAGES=(pulseaudio)
 BLUETOOTH_PACKAGES=(bluez bluez-utils)
 
 # ApplicationHandler.install_applications(): users get the PipeWire units.
@@ -29,14 +28,9 @@ applications_install_audio() {
   debug "Installing audio server: $audio"
   sysinfo_requires_sof_fw && installer_add_additional_packages sof-firmware
   sysinfo_requires_alsa_fw && installer_add_additional_packages alsa-firmware
-  case $audio in
-    pipewire)
-      installer_add_additional_packages "${PIPEWIRE_PACKAGES[@]}"
-      applications_enable_pipewire "$@"
-      ;;
-    pulseaudio) installer_add_additional_packages "${PULSEAUDIO_PACKAGES[@]}" ;;
-    *) die "unknown audio server: $audio" ;;
-  esac
+  [[ $audio == pipewire ]] || die "audio server $audio is not supported by this port (pipewire only)"
+  installer_add_additional_packages "${PIPEWIRE_PACKAGES[@]}"
+  applications_enable_pipewire "$@"
 }
 
 # AudioApp._enable_pipewire(): pipewire-pulse in each user's default.target.

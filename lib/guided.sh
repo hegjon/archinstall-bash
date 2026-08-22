@@ -1,13 +1,13 @@
 # shellcheck shell=bash
 # Port of scripts/guided.py: the installation sequence driven by a loaded
 # configuration. The interactive menu is not ported — a configuration file is
-# required.
+# required. No bootloader is installed (the caller does that, as Omarchy's
+# orchestrator installs Limine itself from installer_get_kernel_params and the
+# partition lookups) and archinstall's sanity-check waits (NTP, reflector,
+# keyring WKD) are skipped, which is how Omarchy runs archinstall (offline,
+# skip_ntp, skip_wkd).
 
 ARGS_MOUNTPOINT=/mnt
-ARGS_OFFLINE=0
-ARGS_SKIP_NTP=0
-ARGS_SKIP_WKD=0
-ARGS_SKIP_BOOT=0
 ARGS_DRY_RUN=0
 
 # perform_installation()
@@ -21,29 +21,21 @@ guided_perform_installation() {
   fi
 
   local mountpoint=${DISK_MOUNTPOINT:-$ARGS_MOUNTPOINT}
-  local -a minimal_opts=()
-  [[ -n $CFG_BOOTLOADER && $CFG_BOOT_UKI == true ]] && minimal_opts+=(--no-mkinitcpio)
 
   installer_init "$mountpoint" "${CFG_KERNELS[@]}"
 
   disk_is_pre_mount || installer_mount_ordered_layout
 
-  installer_sanity_check "$ARGS_OFFLINE" "$ARGS_SKIP_NTP" "$ARGS_SKIP_WKD"
-
-  if ! disk_is_pre_mount && disk_is_encrypted; then
-    installer_generate_key_files
-  fi
-
   [[ $CFG_HAS_MIRROR_CONFIG == true ]] && installer_set_mirrors live
 
-  installer_minimal_installation "${minimal_opts[@]}"
+  installer_minimal_installation
 
   [[ $CFG_HAS_MIRROR_CONFIG == true ]] && installer_set_mirrors on_target
 
   [[ $CFG_SWAP_ENABLED == true ]] && installer_setup_swap "$CFG_SWAP_ALGO"
 
-  if [[ -n $CFG_BOOTLOADER && $CFG_BOOTLOADER != no_bootloader && $ARGS_SKIP_BOOT != 1 ]]; then
-    installer_add_bootloader "$CFG_BOOTLOADER" "$CFG_BOOT_UKI" "$CFG_BOOT_REMOVABLE" "$CFG_BOOT_PLYMOUTH"
+  if [[ -n $CFG_BOOTLOADER && $CFG_BOOTLOADER != no_bootloader ]]; then
+    warn "bootloader $CFG_BOOTLOADER requested but this port installs no bootloader; the caller must (Omarchy's orchestrator installs Limine itself)"
   fi
 
   [[ -n $CFG_NETWORK_TYPE ]] && network_install_config "$CFG_NETWORK_TYPE"
@@ -66,10 +58,6 @@ guided_perform_installation() {
 
   ((${#CFG_SERVICES[@]})) && installer_enable_service "${CFG_SERVICES[@]}"
 
-  if disk_has_default_btrfs_vols && [[ -n $BTRFS_SNAPSHOT_TYPE ]]; then
-    installer_setup_btrfs_snapshot "$BTRFS_SNAPSHOT_TYPE"
-  fi
-
   ((${#CFG_CUSTOM_COMMANDS[@]})) && installer_run_custom_user_commands "${CFG_CUSTOM_COMMANDS[@]}"
 
   installer_genfstab
@@ -82,27 +70,9 @@ guided_perform_installation() {
   return $rc
 }
 
-# validate_bootloader_layout(): Limine + UKI wants the ESP to hold /boot.
-guided_validate_bootloader_layout() {
-  [[ -n $CFG_BOOTLOADER && $CFG_BOOTLOADER != no_bootloader ]] || return 0
-  [[ $DISK_CONFIG_PRESENT == true ]] || return 0
-  disk_is_pre_mount && return 0
-  local boot efi
-  if sysinfo_has_uefi; then
-    efi=$(installer_get_efi_partition) || { error 'No EFI system partition (flag esp with a mountpoint) in the disk layout'; return 1; }
-    if [[ $CFG_BOOT_UKI == true && ${PART_MOUNTPOINT[efi]} != /boot && ${PART_MOUNTPOINT[efi]} != /efi ]]; then
-      error "UKI requires the ESP to be mounted at /boot or /efi, not ${PART_MOUNTPOINT[efi]}"
-      return 1
-    fi
-  fi
-  boot=$(installer_get_boot_partition) || { error 'No boot partition (flag boot with a mountpoint) in the disk layout'; return 1; }
-  return 0
-}
-
 # main()
 guided_main() {
   config_save
-  guided_validate_bootloader_layout || return 1
 
   if ((ARGS_DRY_RUN)); then
     info 'Dry run: configuration parsed, nothing was written to disk.'

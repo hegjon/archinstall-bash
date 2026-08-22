@@ -28,13 +28,11 @@ fi
 # open_installer(config, target)
 installer_init "$target" "${CFG_KERNELS[@]}"
 disk_is_pre_mount || installer_mount_ordered_layout
-installer_sanity_check 1 1 1 # offline, skip_ntp, skip_wkd
+# sanity_check(offline=True, skip_ntp=True, skip_wkd=True): nothing to wait for
 
 # _install_root_image(ctx): btrfs receive the image and make it @ (Omarchy)
 
-if ! disk_is_pre_mount && disk_is_encrypted; then
-  installer_generate_key_files
-fi
+# generate_key_files(): a no-op for Omarchy's layout (only root is encrypted)
 
 [[ $CFG_HAS_MIRROR_CONFIG == true ]] && installer_set_mirrors live
 

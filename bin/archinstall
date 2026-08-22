@@ -19,11 +19,10 @@ Options:
   --config FILE        JSON configuration (user_configuration.json)
   --creds FILE         JSON credentials (user_credentials.json)
   --mountpoint DIR     Target mountpoint (default: /mnt, or disk_config.mountpoint)
-  --silent             Accepted for compatibility (this port is always non-interactive)
-  --offline            Do not wait for reflector / assume no network
-  --skip-ntp           Do not wait for time synchronization
-  --skip-wkd           Do not wait for the archlinux-keyring WKD sync
-  --skip-boot          Do not install a bootloader
+  --silent, --offline, --skip-ntp, --skip-wkd, --skip-boot
+                       Accepted for compatibility: this port is always
+                       non-interactive, never waits for NTP/reflector/WKD and
+                       never installs a bootloader
   --dry-run            Parse and validate the configuration, write nothing
   --debug              Echo debug output to stderr
   --version            Print the version
@@ -40,11 +39,7 @@ while (($#)); do
     --creds=*) CREDS_FILE=${1#*=}; shift ;;
     --mountpoint) ARGS_MOUNTPOINT=$2; shift 2 ;;
     --mountpoint=*) ARGS_MOUNTPOINT=${1#*=}; shift ;;
-    --silent) shift ;;
-    --offline) ARGS_OFFLINE=1; shift ;;
-    --skip-ntp) ARGS_SKIP_NTP=1; shift ;;
-    --skip-wkd) ARGS_SKIP_WKD=1; shift ;;
-    --skip-boot) ARGS_SKIP_BOOT=1; shift ;;
+    --silent|--offline|--skip-ntp|--skip-wkd|--skip-boot) shift ;;
     --dry-run|--dry_run) ARGS_DRY_RUN=1; shift ;;
     --debug) ARCHINSTALL_DEBUG=1; shift ;;
     --script) [[ $2 == guided ]] || die "only the guided script is available"; shift 2 ;;

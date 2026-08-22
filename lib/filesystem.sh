@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 # Port of lib/disk/filesystem.py (FilesystemHandler) and the partitioning,
 # formatting, encryption and btrfs parts of lib/disk/device_handler.py
-# (DeviceHandler). pyparted is replaced by sfdisk: the partition table is
-# written declaratively and read back to learn the device nodes.
+# (DeviceHandler) for wiped disks. pyparted is replaced by sfdisk: the
+# partition table is written declaratively and read back to learn the device
+# nodes.
 
 FS_TMP_BTRFS_MOUNT=/mnt/arch_btrfs
 
@@ -57,11 +58,10 @@ fs_perform_filesystem_operations() {
   for d in "${device_mods[@]}"; do
     fs_format_partitions "$d"
     for i in $(disk_partition_indexes_sorted "$d"); do
-      if [[ ${PART_FS[i]} == btrfs ]] && part_is_create_or_modify "$i"; then
-        fs_create_btrfs_volumes "$i"
-      fi
+      [[ ${PART_FS[i]} == btrfs ]] && fs_create_btrfs_volumes "$i"
     done
   done
+  return 0
 }
 
 # DeviceHandler.umount_all_existing()
@@ -137,56 +137,30 @@ fs_sfdisk_line() {
   printf '%s\n' "$line"
 }
 
-# DeviceHandler.partition(): write the partition table for device $1 and
-# record the created partitions' device nodes.
+# DeviceHandler.partition() for a wiped device: write the table and record the
+# created partitions' device nodes.
 fs_partition_device() {
-  local d=$1 disk=${DEV_PATH[$1]} table sector_size i script='' n
+  local d=$1 disk=${DEV_PATH[$1]} table sector_size i script='' n=0
   table=$(fs_partition_table)
   sector_size=$(disk_sector_size "$disk")
 
   local -a created=()
   for i in $(disk_partition_indexes_sorted "$d"); do
-    part_exists "$i" || created+=("$i")
+    created+=("$i")
+    n=$((n + 1))
   done
-
-  if [[ ${DEV_WIPE[d]} == true ]]; then
-    n=0
-    for i in "${created[@]}"; do
-      [[ ${PART_STATUS[i]} == delete ]] || n=$((n + 1))
-    done
-    if [[ $table == dos ]] && ((n > 3)); then
-      die 'Too many partitions on disk, MBR disks can only have 3 primary partitions'
-    fi
-    fs_wipe_dev "$disk"
-    script="label: $table"$'\n'"unit: sectors"$'\n'
-    for i in "${created[@]}"; do
-      [[ ${PART_STATUS[i]} == delete ]] && continue
-      script+=$(fs_sfdisk_line "$i" "$sector_size" "$table")$'\n'
-    done
-    info "Creating partitions: $disk"
-    debug "sfdisk script for $disk:"$'\n'"$script"
-    fs_sfdisk "$disk" "$script" --wipe always --wipe-partitions always
-  else
-    info "Use existing device: $disk"
-    [[ $(lsblk_value "$disk" PTTYPE) == "$table" ]] || warn "$disk has a $(lsblk_value "$disk" PTTYPE) table, expected $table"
-    # Modifications and deletions remove the existing partition first.
-    for i in "${created[@]}"; do
-      [[ ${PART_STATUS[i]} == modify || ${PART_STATUS[i]} == delete ]] || continue
-      info "Delete existing partition: ${PART_DEVPATH[i]}"
-      n=$(lsblk_value "${PART_DEVPATH[i]}" PARTN)
-      [[ -n $n ]] || die "No partition for dev path found: ${PART_DEVPATH[i]}"
-      sys_cmd sfdisk --delete "$disk" "$n" || die "Unable to delete partition $n on $disk: $SYS_CMD_OUTPUT"
-    done
-    for i in "${created[@]}"; do
-      [[ ${PART_STATUS[i]} == delete ]] && continue
-      script+=$(fs_sfdisk_line "$i" "$sector_size" "$table")$'\n'
-    done
-    if [[ -n $script ]]; then
-      info "Creating partitions: $disk"
-      debug "sfdisk script for $disk:"$'\n'"$script"
-      fs_sfdisk "$disk" "$script" --append --wipe-partitions always
-    fi
+  if [[ $table == dos ]] && ((n > 3)); then
+    die 'Too many partitions on disk, MBR disks can only have 3 primary partitions'
   fi
+
+  fs_wipe_dev "$disk"
+  script="label: $table"$'\n'"unit: sectors"$'\n'
+  for i in "${created[@]}"; do
+    script+=$(fs_sfdisk_line "$i" "$sector_size" "$table")$'\n'
+  done
+  info "Creating partitions: $disk"
+  debug "sfdisk script for $disk:"$'\n'"$script"
+  fs_sfdisk "$disk" "$script" --wipe always --wipe-partitions always
 
   udev_sync
   fs_partprobe "$disk"
@@ -195,21 +169,19 @@ fs_partition_device() {
   # sector (never predict a partition number).
   local start_sector node start
   for i in "${created[@]}"; do
-    [[ ${PART_STATUS[i]} == delete ]] && { PART_DEVPATH[i]=''; continue; }
     start_sector=$((PART_START[i] / sector_size))
     node=''
     while IFS=$'\x1f' read -r node start; do
       [[ $start == "$start_sector" ]] && break
       node=''
-    done < <(sfdisk -J -- "$disk" | jq -r '.partitiontable.partitions[] | [.node, .start] | map(tostring) | join("\u001f")')
+    done < <(sfdisk -J "$disk" | jq -r '.partitiontable.partitions[] | [.node, .start] | map(tostring) | join("\u001f")')
     [[ -n $node ]] || die "partition starting at sector $start_sector not found on $disk after partitioning"
     [[ -b $node ]] || { udev_sync; [[ -b $node ]] || die "partition device $node did not appear"; }
     PART_DEVPATH[i]=$node
     debug "Wiping signatures from: $node"
     sys_cmd wipefs --all "$node" || die "wipefs $node failed: $SYS_CMD_OUTPUT"
   done
-  ((${#created[@]})) && udev_sync
-  return 0
+  udev_sync
 }
 
 # Run sfdisk with a script on stdin. Writing the table races udev: probes
@@ -286,13 +258,11 @@ fs_format_encrypted() {
 fs_format_partitions() {
   local d=$1 i dev
   for i in $(disk_partition_indexes_sorted "$d"); do
-    part_is_create_or_modify "$i" || continue
     [[ -n ${PART_DEVPATH[i]} ]] || die 'When formatting, all partitions must have a path set'
     [[ ${PART_FS[i]} != crypto_LUKS ]] || die 'Crypto luks cannot be set as a filesystem type'
     [[ -n ${PART_FS[i]} ]] || die 'File system type must be set for modification'
   done
   for i in $(disk_partition_indexes_sorted "$d"); do
-    part_is_create_or_modify "$i" || continue
     dev=${PART_DEVPATH[i]}
     if part_is_encrypted "$i"; then
       fs_format_encrypted "$dev" "$(part_mapper_name "$i")" "${PART_FS[i]}"

@@ -50,12 +50,6 @@ chroot_cmd_as() {
   sys_cmd arch-chroot -S "$INST_TARGET" su - "$user" -c "$*"
 }
 
-# utils/util.py generate_password(): urandom → printable ASCII.
-generate_password() {
-  local length=${1:-64}
-  tr -dc 'A-Za-z0-9!"#$%&()*+,-./:;<=>?@[\]^_`{|}~' </dev/urandom | head -c "$length"
-}
-
 # lib/models/users.py Password(plaintext): hash with yescrypt (what
 # crypt_yescrypt() produces), falling back to sha512-crypt where mkpasswd is
 # unavailable.
